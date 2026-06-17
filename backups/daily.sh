@@ -1,18 +1,33 @@
 #!/bin/bash
-set -x
+set -euo pipefail
 
-echo "===== Backup script started at $(date '+%Y-%m-%d %H:%M:%S') ====="
+LOG_DIR="/home/leslie/.local/log"
+LOG_FILE="$LOG_DIR/daily_backup.log"
+mkdir -p "$LOG_DIR"
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"
+}
+
+BACKUP_DIR="/home/leslie/scripts/backups"
+
+log "===== Daily backup script started ====="
 
 running_containers=$(docker ps -q)
 
-docker stop $running_containers
+if [[ -n "$running_containers" ]]; then
+    docker stop $running_containers
+fi
+
 docker start pihole
 snapraid sync
 snapraid scrub
 
-sh /home/leslie/scripts/backups/backup_to_laptop.sh || echo "Laptop backup failed at $(date '+%Y-%m-%d %H:%M:%S')"
-sh /home/leslie/scripts/backups/backup_to_backblaze.sh || echo "Backblaze backup failed at $(date '+%Y-%m-%d %H:%M:%S')"
+sh "$BACKUP_DIR/backup_to_laptop.sh" || log "Laptop backup failed"
+sh "$BACKUP_DIR/backup_to_backblaze.sh" || log "Backblaze backup failed"
 
-docker start $running_containers
+if [[ -n "$running_containers" ]]; then
+    docker start $running_containers
+fi
 
-echo "===== Backup script finished at $(date '+%Y-%m-%d %H:%M:%S') ====="
+log "===== Daily backup script finished ====="
