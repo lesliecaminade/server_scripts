@@ -17,12 +17,30 @@ REPO="b2:${B2_BUCKET}:${B2_REPO_PATH}"
 
 LOG_DIR="/home/leslie/.local/log"
 LOG_FILE="$LOG_DIR/backup_to_backblaze.log"
+LAST_SUCCESS_FILE="$LOG_DIR/backup_to_backblaze.last"
 mkdir -p "$LOG_DIR"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
 }
 
+check_last_run() {
+    local interval_seconds=86400
+    if [[ -f "$LAST_SUCCESS_FILE" ]]; then
+        local last_ts now_ts elapsed
+        last_ts=$(stat -c %Y "$LAST_SUCCESS_FILE")
+        now_ts=$(date +%s)
+        elapsed=$((now_ts - last_ts))
+        if (( elapsed < interval_seconds )); then
+            local hours=$((elapsed / 3600))
+            local minutes=$(((elapsed % 3600) / 60))
+            log "Skipping backup because last successful run was ${hours}h${minutes}m ago"
+            exit 0
+        fi
+    fi
+}
+
+check_last_run
 log "Backup to Backblaze started"
 
 restic -r "$REPO" backup \
@@ -49,5 +67,6 @@ restic -r "$REPO" forget \
 
 restic -r "$REPO" check
 
+echo "$(date +%s)" > "$LAST_SUCCESS_FILE"
 log "Backup to Backblaze completed successfully"
 
