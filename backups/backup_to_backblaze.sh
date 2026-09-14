@@ -40,8 +40,28 @@ check_last_run() {
     fi
 }
 
+unlock_stale_locks() {
+    local repo="$1"
+    local max_age_seconds=86400
+    local now_ts lock_id lock_time lock_ts age
+    now_ts=$(date +%s)
+    for lock_id in $(restic -r "$repo" list locks 2>/dev/null); do
+        lock_time=$(restic -r "$repo" cat lock "$lock_id" 2>/dev/null | grep -o '"time": *"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+        [[ -z "$lock_time" ]] && continue
+        lock_ts=$(date -d "$lock_time" +%s 2>/dev/null) || continue
+        age=$((now_ts - lock_ts))
+        if (( age > max_age_seconds )); then
+            log "Restic lock $lock_id is $((age / 3600))h old, running unlock"
+            restic -r "$repo" unlock --remove-all
+            break
+        fi
+    done
+}
+
 check_last_run
 log "Backup to Backblaze started"
+
+unlock_stale_locks "$REPO"
 
 restic -r "$REPO" backup \
     /etc \
