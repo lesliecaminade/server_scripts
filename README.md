@@ -30,6 +30,10 @@ Both `backup_to_backblaze.sh` and `backups/backup_to_laptop.sh` now track their 
 
 This prevents overlapping or redundant backups when the scripts are triggered multiple times per day (e.g., by cron, systemd timers, or manual runs).
 
+### Logging
+
+Every script prints timestamped progress to the terminal and appends the same lines to its log in `~/.local/log/` (`daily_backup.log`, `backup_to_backblaze.log`, `backup_to_laptop.log`). Each run reports the repository, the paths being backed up, any restic locks it finds, when each step starts and finishes with its duration, and the step and exit code if something fails. restic's own output is printed to the terminal at its default verbosity but is not written to the log files.
+
 ### Credentials
 
 Backblaze B2 credentials are loaded from `backups/.env.b2`, which is gitignored. The file must define the environment variables that restic expects, for example:
