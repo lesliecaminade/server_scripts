@@ -11,7 +11,7 @@ server_scripts/
 │   ├── backup_to_laptop.sh      # Local-network backup to laptop via SFTP/restic
 │   └── daily.sh                 # Wrapper that runs the backup scripts
 ├── .env.b2                      # Backblaze B2 credentials (gitignored)
-│   (backups/.env.mail           # Gmail app password for result emails (gitignored))
+│   (backups/.env.mail           # Gmail settings used by backup_status_email.py (gitignored))
 └── README.md                    # This file
 ```
 
@@ -73,9 +73,14 @@ The laptop (`leslie-ideapad-slim-5-light-14abr8`) backs itself up to this server
 
 ### Result Emails
 
-After each real backup the laptop emails the result (`Backup SUCCESS` or `Backup FAILURE`, with the last 40 lines of restic output). Failure emails are limited to one every 6 hours. Skips do not send email. The laptop's `~/scripts/send_mail.py` reads its Gmail settings over SSH from `backups/.env.mail` on this server, so no mail password is stored on the laptop.
+leslie-fileserver sends the result emails, not the laptop. After each real backup the laptop only pipes the result (last 40 lines of restic output) over SSH to `backups/backup_status_email.py --notify` on this server. That script is the only code that holds the Gmail settings and sends backup email. The laptop has no mail password and makes no connection to Gmail.
 
-`backups/.env.mail` (mode 600, gitignored) defines `MAIL_USER`, `MAIL_APP_PASSWORD` (a Google app password) and `MAIL_TO`. See `backups/.env.mail.example`.
+- **Subject and result:** `[Backup SUCCESS|FAILURE|NOTICE] <laptop hostname> laptop to server <date>`. NOTICE is sent when stale restic locks were removed.
+- **Daily status report:** `--notify` also records SUCCESS and FAILURE results in `~/.local/log/laptop_backup.status` on this server. The daily `backup_status_email.py` report (13:00 cron) shows them in its "Laptop to server backup" section, warns after 48 hours with no result and fails after 72 hours.
+- **When emails are sent:** only after a real backup run. Skips send nothing. The laptop limits failure emails to one every 6 hours.
+- **If this server is unreachable:** the laptop logs "Could not send ... email" and the backup is unaffected.
+
+The laptop's `~/scripts/send_mail.py` is a thin client for `--notify`. `backups/.env.mail` (mode 600, gitignored) holds `MAIL_USER`, `MAIL_APP_PASSWORD` (a Google app password) and `MAIL_TO`. See `backups/.env.mail.example`.
 
 ## Usage
 
