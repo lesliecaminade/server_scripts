@@ -118,6 +118,31 @@ run_step() {
     log "Finished: $name in $(format_duration $((SECONDS - start)))"
 }
 
+# Runs a snapraid command. Soft errors (files that changed or vanished while
+# snapraid read them) do not stop the backups: the disks are fine and the next
+# sync picks those files up. I/O errors, data errors or any other failure still
+# abort the run.
+run_snapraid() {
+    local name="snapraid $1"
+    local start=$SECONDS
+    local exit_code=0
+    local out
+    out=$(mktemp)
+    log "Starting: $name"
+    snapraid "$1" 2>&1 | tee "$out" || exit_code=$?
+    if (( exit_code == 0 )); then
+        log "Finished: $name in $(format_duration $((SECONDS - start)))"
+    elif grep -qE '^ *0 io errors' "$out" && grep -qE '^ *0 data errors' "$out" \
+            && grep -qE '^ *[1-9][0-9]* soft errors' "$out"; then
+        log "WARNING: $name finished with $(grep -oE '[0-9]+ soft errors' "$out" | tail -1) and no io or data errors after $(format_duration $((SECONDS - start))), continuing with the backups"
+    else
+        log "ERROR: $name failed with exit code $exit_code after $(format_duration $((SECONDS - start))), aborting daily backup"
+        rm -f "$out"
+        exit "$exit_code"
+    fi
+    rm -f "$out"
+}
+
 # Runs a backup script without aborting the daily run if it fails or hangs.
 run_backup() {
     local name="$1"
@@ -194,8 +219,8 @@ else
 fi
 
 run_step "start pihole" docker start pihole
-run_step "snapraid sync" snapraid sync
-run_step "snapraid scrub" snapraid scrub
+run_snapraid sync
+run_snapraid scrub
 
 run_backup "Laptop backup" "$BACKUP_DIR/backup_to_laptop.sh"
 run_backup "Backblaze backup" "$BACKUP_DIR/backup_to_backblaze.sh"

@@ -193,6 +193,9 @@ def check_daily():
         add(FAIL, "The last daily run has no finish line.")
     if errors and finished:
         add(WARN, "The last daily run finished, but a step reported an error.")
+    soft = [l for l in run_lines if "WARNING: snapraid" in l and "soft errors" in l]
+    for l in soft:
+        add(WARN, "SnapRAID: " + l[20:].split(" after ")[0] + " (backups still ran).")
 
 
 # 2. Backup freshness -----------------------------------------------------
@@ -231,6 +234,129 @@ def check_freshness():
         lines.append("Could not read the Backblaze repository: " + out.strip()[:150])
         add(WARN, "Could not read the Backblaze repository (network or key problem).")
     sections.append(("Backup freshness", lines))
+
+
+# 2c. Google Drive backup (gdrive-backup.sh, monthly from leslie's crontab) --
+GDRIVE_LOG_DIR = "/mnt/hdd-stripe/backups/google-drive/logs"
+
+
+def gdrive_latest_log():
+    try:
+        logs = sorted(f for f in os.listdir(GDRIVE_LOG_DIR) if f.startswith("backup_") and f.endswith(".log"))
+    except OSError:
+        return None
+    return os.path.join(GDRIVE_LOG_DIR, logs[-1]) if logs else None
+
+
+def check_gdrive():
+    lines = []
+    path = gdrive_latest_log()
+    if not path:
+        lines.append(f"No log found in {GDRIVE_LOG_DIR}")
+        add(FAIL, "Google Drive backup: no run found.")
+        sections.append(("Google Drive backup", lines))
+        return
+    with open(path, errors="replace") as f:
+        log = f.read().splitlines()
+    age = time.time() - os.stat(path).st_mtime
+    ok = [l for l in log if "] OK " in l]
+    bad = [l for l in log if "] FAILED " in l]
+    lines.append(f"Last run: {os.path.basename(path)[7:-4]} (log updated {age_text(age)})")
+    for l in ok:
+        lines.append("  OK: " + l.split("] OK ", 1)[1])
+    for l in bad:
+        lines.append("  FAILED: " + l.split("] FAILED ", 1)[1].split(" (see", 1)[0])
+    if not ok and not bad:
+        lines.append("  No result line: the run is still going or was cut off")
+    if bad:
+        add(FAIL, "Google Drive backup: the last run failed.")
+    elif not ok and age > 6 * H:
+        add(FAIL, "Google Drive backup: the last run has no result line.")
+    if age > 40 * 24 * H:
+        add(FAIL, f"Google Drive backup: last run was {age_text(age)} (it runs monthly).")
+    elif age > 32 * 24 * H:
+        add(WARN, f"Google Drive backup: last run was {age_text(age)} (it runs monthly).")
+    sections.append(("Google Drive backup", lines))
+
+
+# Root cause --------------------------------------------------------------
+# Each rule: pattern that proves the cause, plain explanation, what to do,
+# and a pattern for the evidence lines to quote.
+CAUSES = [
+    (r"\b([1-9]\d*) soft errors",
+     "SnapRAID hit {0} soft error(s): files on the data disks were changed, moved or deleted "
+     "while SnapRAID was reading them, or could not be opened. This is NOT disk damage and NOT "
+     "something SnapRAID repairs. Something wrote to the data disks during the sync (a service "
+     "that daily.sh does not stop, or another backup writing to the array).",
+     "Find what writes to the files listed below and stop it during the sync (or exclude that "
+     "folder in /etc/snapraid.conf), so the next sync covers them. The backups are not blocked by soft errors.",
+     r"(?i)missing|changed|error (opening|reading|accessing)|unexpected|permission denied|warning"),
+    (r"\b([1-9]\d*) io errors",
+     "SnapRAID hit {0} I/O error(s): a disk failed to read or write. A disk may be failing.",
+     "Check the disk with 'smartctl -a' before the next sync.",
+     r"(?i)error|disk|/dev/"),
+    (r"\b([1-9]\d*) data errors",
+     "SnapRAID found {0} data error(s): silent corruption. This IS what SnapRAID repairs.",
+     "Run 'snapraid -e fix', then 'snapraid -p new scrub'.",
+     r"(?i)error|block|file"),
+    (r"(?i)repository is already locked",
+     "A restic repository was locked by another restic process (or a stale lock).",
+     "Check 'restic list locks'; if the owner is gone, run 'restic unlock'.",
+     r"(?i)lock"),
+    (r"stopped after the time limit",
+     "A backup step was stopped because it ran longer than its time limit.",
+     "Check the network or the repository size; raise BACKUP_TIMEOUT if needed.",
+     r"time limit"),
+    (r"(?i)no space left on device",
+     "A disk is full.",
+     "Free space on the disk named below.",
+     r"(?i)no space"),
+    (r"(?i)host key verification failed|connection refused|no route to host|connection timed out|could not resolve",
+     "A backup target could not be reached over the network.",
+     "Check that the target machine is on and reachable over Tailscale/SSH.",
+     r"(?i)host key|refused|no route|timed out|resolve|ssh|sftp"),
+    (r"(?i)\b(401|403)\b|unauthorized|invalid (key|credentials)|access denied",
+     "A storage service refused the credentials.",
+     "Check the keys in .env.b2 (Backblaze) or the rclone login (Google Drive).",
+     r"(?i)401|403|unauthori|denied|credential|key"),
+]
+
+
+def root_causes():
+    """Explain why the last run failed, from the run output and the Drive log."""
+    texts = []
+    try:
+        with open(RUN_OUT_FILE, errors="replace") as f:
+            texts.append(("daily.sh run", clean_output(f.read())))
+    except OSError:
+        try:
+            with open(CRON_LOG, errors="replace") as f:
+                t = f.read()
+            i = t.rfind("Daily backup script started")
+            texts.append(("daily.sh run (stdout only)", clean_output(t[i:] if i >= 0 else t[-200000:])))
+        except OSError:
+            pass
+    g = gdrive_latest_log()
+    if g:
+        with open(g, errors="replace") as f:
+            glines = f.read().splitlines()
+        if any("] FAILED " in l for l in glines):
+            texts.append(("Google Drive backup", [l for l in glines if " ERROR " in l or "FAILED" in l]))
+    out = []
+    for source, lines in texts:
+        joined = "\n".join(lines)
+        for cause, explain, todo, ev in CAUSES:
+            m = re.search(cause, joined)
+            if not m:
+                continue
+            out.append(f"* {source}: " + explain.format(*(m.groups() or ("",))))
+            out.append(f"  What to do: {todo}")
+            evidence = [l for l in lines if re.search(ev, l) and not re.search(r"\b0 (io|data|soft) errors", l)]
+            if evidence:
+                out.append("  Evidence:")
+                out += ["    " + l[:250] for l in evidence[-15:]]
+            out.append("")
+    return out
 
 
 # 3. SnapRAID -------------------------------------------------------------
@@ -322,7 +448,7 @@ def check_disks():
 
 
 def build():
-    for fn in (check_daily, check_freshness, check_snapraid, check_containers, check_disks):
+    for fn in (check_daily, check_freshness, check_gdrive, check_snapraid, check_containers, check_disks):
         try:
             fn()
         except Exception as e:  # noqa: BLE001
@@ -338,6 +464,13 @@ def build():
             body.append(f"  [{LABEL[lvl]}] {text}")
     else:
         body.append("No problems found.")
+    if worst > OK:
+        try:
+            rc_lines = root_causes()
+        except Exception as e:  # noqa: BLE001
+            rc_lines = [f"Could not work out the root cause: {e}"]
+        body += ["", "Root cause", "----------"]
+        body += rc_lines or ["No known cause matched. See 'Failure details' below for the raw output."]
     for title, lines in sections:
         body += ["", title, "-" * len(title)] + lines
     return subject, "\n".join(body) + "\n"
