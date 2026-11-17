@@ -11,6 +11,7 @@ server_scripts/
 │   ├── backup_to_laptop.sh      # Local-network backup to laptop via SFTP/restic
 │   └── daily.sh                 # Wrapper that runs the backup scripts
 ├── .env.b2                      # Backblaze B2 credentials (gitignored)
+│   (backups/.env.mail           # Gmail app password for result emails (gitignored))
 └── README.md                    # This file
 ```
 
@@ -53,6 +54,28 @@ Both scripts keep:
 - weekly snapshots for the last 10 weeks
 - monthly snapshots for the last 10 months
 - yearly snapshots for the last 10 years
+
+## Laptop-Side Backup (laptop to this server)
+
+The laptop (`leslie-ideapad-slim-5-light-14abr8`) backs itself up to this server's restic repository at `/mnt/hdd-stripe/backups/leslie-ideapad-slim-5-light-14abr8/restic` over SFTP. The script lives on the laptop at `~/scripts/backup_to_server.sh` (not in this repo) and runs hourly from the laptop's cron. It backs up `~/Drive` and `~/scripts`.
+
+### Behaviour
+
+- **24-hour guard:** the script skips if the newest snapshot for the laptop (any path set) is under 24 hours old. An earlier version only checked the first snapshot group and so never skipped.
+- **Server check:** if this server is unreachable over SSH, it logs and exits quietly.
+
+### Restic Lock Protection
+
+1. **Single-run guard:** a local `flock` stops two copies of the script overlapping.
+2. **Lock retry:** restic commands use `--retry-lock 10m` instead of failing on a brief lock.
+3. **Stale-lock cleanup:** before each run it runs `restic unlock` (no `--remove-all`), which removes only locks restic judges stale. A NOTICE email is sent if any are removed. A stale exclusive lock from 2026-10-23 had blocked the hourly job until it was cleared.
+4. **Graceful prune limit:** `forget --prune` runs under `timeout --signal=INT 2h` so restic can release its exclusive lock cleanly.
+
+### Result Emails
+
+After each real backup the laptop emails the result (`Backup SUCCESS` or `Backup FAILURE`, with the last 40 lines of restic output). Failure emails are limited to one every 6 hours. Skips do not send email. The laptop's `~/scripts/send_mail.py` reads its Gmail settings over SSH from `backups/.env.mail` on this server, so no mail password is stored on the laptop.
+
+`backups/.env.mail` (mode 600, gitignored) defines `MAIL_USER`, `MAIL_APP_PASSWORD` (a Google app password) and `MAIL_TO`. See `backups/.env.mail.example`.
 
 ## Usage
 
