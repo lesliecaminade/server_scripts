@@ -7,6 +7,9 @@ It only reads: it never starts, stops or changes a backup or a container.
 Usage:
     backup_status_email.py            send the email
     backup_status_email.py --print    print the report, send nothing
+    backup_status_email.py --after-run [--trigger scheduled|manual]
+                                      called by daily.sh when it ends: report the
+                                      run that just finished (not "still running")
 
 Settings come from .env.mail in the same folder (mode 600):
     MAIL_USER=<gmail address that sends the mail>
@@ -45,6 +48,8 @@ sections = []  # (title, [lines])
 
 
 IN_PROGRESS = False
+AFTER_RUN = "--after-run" in sys.argv
+TRIGGER = sys.argv[sys.argv.index("--trigger") + 1] if "--trigger" in sys.argv else ""
 
 
 def add(level, text, soft=False):
@@ -92,11 +97,52 @@ def load_env(path):
     return out
 
 
+# Failure details ---------------------------------------------------------
+RUN_OUT_FILE = os.path.join(LOG_DIR, "daily_backup_last_run.out")
+CRON_LOG = "/var/log/daily_backup.log"
+NOISE = re.compile(r"stripe/s|MB/s|^\s*\d+%, \d+ MB|wait time|^\s*\|_+|^\s*(d\d+|parity|raid|hash|sched|misc)\s+\d+%\s*\||^\s*$")
+
+
+def clean_output(text):
+    out = []
+    for l in text.replace("\r", "\n").splitlines():
+        if not NOISE.search(l):
+            out.append(l.rstrip()[:300])
+    return out
+
+
+def failure_details(max_lines=30):
+    """The output of the last run up to and just after its first failure."""
+    lines = None
+    try:
+        with open(RUN_OUT_FILE, errors="replace") as f:
+            lines = clean_output(f.read())
+        source = RUN_OUT_FILE
+    except OSError:
+        pass
+    if lines is None:  # older runs: stdout-only cron log
+        try:
+            with open(CRON_LOG, errors="replace") as f:
+                text = f.read()
+            i = text.rfind("Daily backup script started")
+            lines = clean_output(text[i:] if i >= 0 else text[-200000:])
+            source = CRON_LOG + " (stdout only: error messages from stderr were not kept)"
+        except OSError:
+            return []
+    bad = re.compile(r"ERROR|failed with exit code|failed at|stopped after|soft errors|io errors|data errors")
+    idx = [i for i, l in enumerate(lines) if bad.search(l) and not re.search(r"\b0 (io|data|soft) errors", l)]
+    if not idx:
+        return []
+    first = idx[0]
+    chunk = lines[max(0, first - max_lines):first + 6]
+    return [f"Source: {source}", ""] + chunk
+
+
 # 1. The last daily run ---------------------------------------------------
 def check_daily():
     global IN_PROGRESS
     rc, _ = run(["pgrep", "-f", "bash.*daily.sh"], timeout=10)
-    IN_PROGRESS = rc == 0
+    IN_PROGRESS = rc == 0 and not AFTER_RUN  # daily.sh itself is still alive when it calls us
     lines = []
     try:
         with open(DAILY_LOG, errors="replace") as f:
@@ -135,6 +181,10 @@ def check_daily():
     if IN_PROGRESS:
         lines.append("daily.sh is running now. Container and SnapRAID problems are normal until it ends.")
     sections.append(("Daily backup run", lines))
+    if errors or any("FAILED" in l for l in lines):
+        det = failure_details()
+        if det:
+            sections.append(("Failure details (output before the first error)", det))
     if age > 36 * H and not IN_PROGRESS:
         add(FAIL, f"The daily run last started {age_text(age)}. It should run every day.")
     elif errors and not finished:
@@ -280,7 +330,7 @@ def build():
     worst = max([lvl for lvl, _ in findings], default=OK)
     host = socket.gethostname()
     status = "RUNNING" if IN_PROGRESS and worst == OK else LABEL[worst]
-    subject = f"[Backup {status}] {host} {datetime.now():%Y-%m-%d}"
+    subject = f"[Backup {status}] {host} {datetime.now():%Y-%m-%d}" + (f" ({TRIGGER})" if TRIGGER else "")
     body = [f"Backup status for {host}", f"Report time: {datetime.now():%Y-%m-%d %H:%M}", f"Overall: {status}", ""]
     if findings:
         body.append("Problems:")

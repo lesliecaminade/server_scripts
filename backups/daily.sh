@@ -15,6 +15,13 @@ fi
 
 set -Eeuo pipefail
 
+# "daily.sh --manual" runs a backup now. Cron runs it without the flag. Both
+# send the same summary email when the run ends, whether it worked or not.
+TRIGGER=scheduled
+for arg in "$@"; do
+    [[ "$arg" == "--manual" ]] && TRIGGER=manual
+done
+
 LOG_DIR="/home/leslie/.local/log"
 LOG_FILE="$LOG_DIR/daily_backup.log"
 STATE_FILE="$LOG_DIR/daily_backup.containers"
@@ -78,6 +85,12 @@ on_exit() {
     if (( exit_code == 0 && restart_failed != 0 )); then
         exit_code=1
     fi
+    # Containers are running again by now. A mail problem must never change
+    # the result of the run or hold it up for long.
+    sleep 2  # let the output copy above finish writing
+    log "Sending summary email ($TRIGGER run)"
+    timeout 180 python3 "$BACKUP_DIR/backup_status_email.py" --after-run --trigger "$TRIGGER" >> "$LOG_FILE" 2>&1 \
+        || log "Could not send the summary email."
     exit "$exit_code"
 }
 
@@ -131,6 +144,13 @@ if ! flock -n 9; then
     log "Another daily backup is already running. Exiting."
     exit 0
 fi
+
+# Keep the full output of this run (stdout AND stderr of every step) in a file
+# that the summary email reads when something fails. Without this, stderr only
+# went to cron mail and the real cause of a failure was lost.
+RUN_OUT="$LOG_DIR/daily_backup_last_run.out"
+: > "$RUN_OUT"
+exec > >(tee -a "$RUN_OUT") 2>&1
 
 SCRIPT_START=$SECONDS
 log "===== Daily backup script started ====="
