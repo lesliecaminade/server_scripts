@@ -7,6 +7,8 @@ It only reads: it never starts, stops or changes a backup or a container.
 Usage:
     backup_status_email.py            send the email
     backup_status_email.py --print    print the report, send nothing
+    backup_status_email.py --notify SUBJECT [--result R] [--host H]
+                                      send stdin as an email (used by the laptop)
 
 Settings come from .env.mail in the same folder (mode 600):
     MAIL_USER=<gmail address that sends the mail>
@@ -32,6 +34,8 @@ DAILY_LOG = os.path.join(LOG_DIR, "daily_backup.log")
 B2_LAST = os.path.join(LOG_DIR, "backup_to_backblaze.last")
 LAPTOP_LAST = os.path.join(LOG_DIR, "backup_to_laptop.last")
 STATE_FILE = os.path.join(LOG_DIR, "daily_backup.containers")
+# Written by --notify when the laptop reports a result.
+LAPTOP_STATUS = os.path.join(LOG_DIR, "laptop_backup.status")
 B2_REPO = "b2:Homelab2002349994:fileserver"
 SNAPRAID_CONTENT = "/home/leslie/snapraid/snapraid.content"
 DISKS = ["/mnt/hdd-stripe", "/mnt/hdd-red", "/mnt/hdd-black", "/mnt/ssd-black", "/mnt/hdd-grooved", "/"]
@@ -183,6 +187,31 @@ def check_freshness():
     sections.append(("Backup freshness", lines))
 
 
+# 2b. Laptop to server backup ----------------------------------------------
+def check_laptop_to_server():
+    lines = []
+    try:
+        cfg = load_env(LAPTOP_STATUS)
+        age = time.time() - int(cfg["time"])
+    except (OSError, KeyError, ValueError):
+        lines.append("No result from the laptop yet")
+        add(WARN, "Laptop to server backup: no result recorded yet.")
+        sections.append(("Laptop to server backup", lines))
+        return
+    result = cfg.get("result", "?")
+    lines.append(f"Laptop: {cfg.get('host', '?')}")
+    lines.append(f"Last result: {result} ({age_text(age)})")
+    if cfg.get("detail"):
+        lines.append("  " + cfg["detail"][:200])
+    if result != "SUCCESS":
+        add(FAIL, f"Laptop to server backup: last run reported {result}.")
+    if age > 72 * H:
+        add(FAIL, f"Laptop to server backup: last result was {age_text(age)}.")
+    elif age > 48 * H:
+        add(WARN, f"Laptop to server backup: last result was {age_text(age)}.")
+    sections.append(("Laptop to server backup", lines))
+
+
 # 3. SnapRAID -------------------------------------------------------------
 def check_snapraid():
     lines = []
@@ -272,7 +301,7 @@ def check_disks():
 
 
 def build():
-    for fn in (check_daily, check_freshness, check_snapraid, check_containers, check_disks):
+    for fn in (check_daily, check_freshness, check_laptop_to_server, check_snapraid, check_containers, check_disks):
         try:
             fn()
         except Exception as e:  # noqa: BLE001
@@ -308,7 +337,32 @@ def send(subject, body):
     return 0
 
 
+def notify(argv):
+    """--notify SUBJECT [--result SUCCESS|FAILURE|NOTICE] [--host NAME]
+    Body comes from stdin. Used by other machines (the laptop) so this file is
+    the only code that sends backup email. A SUCCESS or FAILURE result is also
+    recorded for the daily status report."""
+    def opt(name, default=""):
+        return argv[argv.index(name) + 1] if name in argv else default
+    subject = opt("--notify")
+    result, host = opt("--result"), opt("--host", "unknown")
+    body = sys.stdin.read() or "(no details)"
+    if result in ("SUCCESS", "FAILURE"):
+        detail = body.strip().splitlines()[0] if body.strip() else ""
+        tmp = LAPTOP_STATUS + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(f"time={int(time.time())}\nhost={host}\nresult={result}\ndetail={detail}\n")
+        os.replace(tmp, LAPTOP_STATUS)
+    return send(subject, body)
+
+
 if __name__ == "__main__":
+    if "--notify" in sys.argv:
+        try:
+            sys.exit(notify(sys.argv))
+        except Exception as e:  # noqa: BLE001
+            print("send failed:", e, file=sys.stderr)
+            sys.exit(1)
     subject, body = build()
     if "--print" in sys.argv:
         print("Subject:", subject, "\n")
