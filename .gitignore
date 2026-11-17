@@ -1,2 +1,3 @@
 .env.b2
 .env.mail
+*.bak*
