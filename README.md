@@ -11,7 +11,7 @@ server_scripts/
 │   ├── backup_to_laptop.sh      # Local-network backup to laptop via SFTP/restic
 │   └── daily.sh                 # Wrapper that runs the backup scripts
 ├── .env.b2                      # Backblaze B2 credentials (gitignored)
-│   (backups/.env.mail           # Gmail settings used by backup_status_email.py (gitignored))
+│   (backups/.env.mail           # Gmail settings for the daily status email (gitignored))
 └── README.md                    # This file
 ```
 
@@ -54,33 +54,6 @@ Both scripts keep:
 - weekly snapshots for the last 10 weeks
 - monthly snapshots for the last 10 months
 - yearly snapshots for the last 10 years
-
-## Laptop-Side Backup (laptop to this server)
-
-The laptop (`leslie-ideapad-slim-5-light-14abr8`) backs itself up to this server's restic repository at `/mnt/hdd-stripe/backups/leslie-ideapad-slim-5-light-14abr8/restic` over SFTP. The script lives on the laptop at `~/scripts/backup_to_server.sh` (not in this repo) and runs hourly from the laptop's cron. It backs up `~/Drive` and `~/scripts`.
-
-### Behaviour
-
-- **24-hour guard:** the script skips if the newest snapshot for the laptop (any path set) is under 24 hours old. An earlier version only checked the first snapshot group and so never skipped.
-- **Server check:** if this server is unreachable over SSH, it logs and exits quietly.
-
-### Restic Lock Protection
-
-1. **Single-run guard:** a local `flock` stops two copies of the script overlapping.
-2. **Lock retry:** restic commands use `--retry-lock 10m` instead of failing on a brief lock.
-3. **Stale-lock cleanup:** before each run it runs `restic unlock` (no `--remove-all`), which removes only locks restic judges stale. A NOTICE email is sent if any are removed. A stale exclusive lock from 2026-10-23 had blocked the hourly job until it was cleared.
-4. **Graceful prune limit:** `forget --prune` runs under `timeout --signal=INT 2h` so restic can release its exclusive lock cleanly.
-
-### Result Emails
-
-leslie-fileserver sends the result emails, not the laptop. After each real backup the laptop only pipes the result (last 40 lines of restic output) over SSH to `backups/backup_status_email.py --notify` on this server. That script is the only code that holds the Gmail settings and sends backup email. The laptop has no mail password and makes no connection to Gmail.
-
-- **Subject and result:** `[Backup SUCCESS|FAILURE|NOTICE] <laptop hostname> laptop to server <date>`. NOTICE is sent when stale restic locks were removed.
-- **Daily status report:** `--notify` also records SUCCESS and FAILURE results in `~/.local/log/laptop_backup.status` on this server. The daily `backup_status_email.py` report (13:00 cron) shows them in its "Laptop to server backup" section, warns after 48 hours with no result and fails after 72 hours.
-- **When emails are sent:** only after a real backup run. Skips send nothing. The laptop limits failure emails to one every 6 hours.
-- **If this server is unreachable:** the laptop logs "Could not send ... email" and the backup is unaffected.
-
-The laptop's `~/scripts/send_mail.py` is a thin client for `--notify`. `backups/.env.mail` (mode 600, gitignored) holds `MAIL_USER`, `MAIL_APP_PASSWORD` (a Google app password) and `MAIL_TO`. See `backups/.env.mail.example`.
 
 ## Usage
 
