@@ -62,6 +62,33 @@ run_step() {
     log "Finished: $name in $(format_duration $((SECONDS - start)))"
 }
 
+# Runs "restic backup". Exit code 3 means restic wrote a snapshot but could not
+# read some source files (for example files that changed or vanished during the
+# run). The snapshot is usable, so this is a warning and the run continues with
+# forget/prune and the success timestamp. Any other failure still aborts. The
+# stderr of restic is copied into the log so the cause of a failure is kept.
+run_restic_backup() {
+    local start=$SECONDS
+    local exit_code=0
+    local err
+    err=$(mktemp)
+    log "Starting: restic backup"
+    restic "$@" 2> "$err" || exit_code=$?
+    cat "$err" >&2
+    if (( exit_code != 0 )); then
+        tail -n 20 "$err" | while IFS= read -r line; do log "  restic: $line"; done
+    fi
+    rm -f "$err"
+    if (( exit_code == 0 )); then
+        log "Finished: restic backup in $(format_duration $((SECONDS - start)))"
+    elif (( exit_code == 3 )); then
+        log "WARNING: restic backup created a snapshot but could not read some files (exit code 3) after $(format_duration $((SECONDS - start))), continuing"
+    else
+        log "ERROR: restic backup failed with exit code $exit_code after $(format_duration $((SECONDS - start))), aborting backup"
+        exit "$exit_code"
+    fi
+}
+
 check_last_run() {
     local interval_seconds=86400
     if [[ -f "$LAST_SUCCESS_FILE" ]]; then
@@ -120,7 +147,7 @@ done
 
 run_step "check for stale restic locks" unlock_stale_locks "$REPO"
 
-run_step "restic backup" restic -r "$REPO" backup \
+run_restic_backup -r "$REPO" backup \
     "${BACKUP_PATHS[@]}" \
     --exclude-caches \
     -e "*/.cache/*"
